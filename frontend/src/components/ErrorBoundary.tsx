@@ -46,6 +46,14 @@ const ErrorBoundary: React.FC = () => {
           login
         </Button>
       </Link>
+	  <Typography sx={{ mt: 2 }} color={'black'} fontWeight={500}>
+        Go back home
+      </Typography>
+      <Link to={'/#'} >
+        <Button variant='contained' sx={{ mt: 2 }}>
+          Home
+        </Button>
+      </Link>
     </FlexContainer>
   )
 }

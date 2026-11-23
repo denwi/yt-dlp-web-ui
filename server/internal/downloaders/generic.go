@@ -3,10 +3,10 @@ package downloaders
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
@@ -63,16 +63,11 @@ func NewGenericDownload(url string, params []string) Downloader {
 func (g *GenericDownloader) Start() error {
 	g.SetPending(true)
 
-	whiltelistedParams, err := argsSanitizer(g.Params)
-	if err != nil {
-		return err
-	}
-
-	g.Params = whiltelistedParams
+	g.Params = argsSanitizer(g.Params)
 
 	out := internal.DownloadOutput{
 		Path:     config.Instance().Paths.DownloadPath,
-		Filename: "%(title)s.%(ext)s",
+		Filename: "%(title).150B [%(id)s].%(ext)s",
 	}
 
 	if g.output.Path != "" {
@@ -88,7 +83,7 @@ func (g *GenericDownloader) Start() error {
 	templateReplacer := strings.NewReplacer("\n", "", "\t", "", " ", "")
 
 	baseParams := []string{
-		strings.Split(g.URL, "?list")[0], //XXX: force no playlist
+		strings.Split(g.URL, "?list")[0], //no playlist
 		"--newline",
 		"--no-colors",
 		"--no-playlist",
@@ -96,6 +91,7 @@ func (g *GenericDownloader) Start() error {
 		templateReplacer.Replace(downloadTemplate),
 		"--progress-template",
 		templateReplacer.Replace(postprocessTemplate),
+		"--no-exec",
 		"--js-runtimes",
 		config.Instance().Paths.JSRuntimePath,
 		"--remote-components",
@@ -104,67 +100,49 @@ func (g *GenericDownloader) Start() error {
 
 	// if user asked to manually override the output path...
 	if !(slices.Contains(g.Params, "-P") || slices.Contains(g.Params, "--paths")) {
-		outputPath := filepath.Join(out.Path, out.Filename)
-
-		rel, err := filepath.Rel(config.Instance().Paths.DownloadPath, outputPath)
-		if err != nil {
-			return err
-		}
-		if strings.HasPrefix(rel, "..") {
-			return errors.New(ErrIsNotSubPath)
-		}
-
 		g.Params = append(g.Params, "-o")
-		g.Params = append(g.Params, outputPath)
+		g.Params = append(g.Params, fmt.Sprintf("%s/%s", out.Path, out.Filename))
 	}
 
 	params := append(baseParams, g.Params...)
-	params = append(params, "--no-exec")
 
 	slog.Info("requesting download", slog.String("url", g.URL), slog.Any("params", params))
 
-	ctx, cancel := context.WithCancel(context.Background())
-
-	cmd := exec.CommandContext(ctx, config.Instance().Paths.DownloaderPath, params...)
+	cmd := exec.Command(config.Instance().Paths.DownloaderPath, params...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		slog.Error("failed to get a stdout pipe", slog.String("err", err.Error()))
+		slog.Error("failed to get a stdout pipe", slog.Any("err", err))
 		panic(err)
 	}
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		slog.Error("failed to get a stderr pipe", slog.String("err", err.Error()))
+		slog.Error("failed to get a stderr pipe", slog.Any("err", err))
 		panic(err)
 	}
 
 	if err := cmd.Start(); err != nil {
-		slog.Error("failed to start yt-dlp process", slog.String("err", err.Error()))
+		slog.Error("failed to start yt-dlp process", slog.Any("err", err))
 		panic(err)
 	}
 
 	g.proc = cmd.Process
 
-	stop := func() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() {
 		stdout.Close()
+		g.progress = internal.DownloadProgress{Status: internal.StatusCompleted, Percentage: "-1"}
 		g.Complete()
-		g.progress.Status = internal.StatusCompleted
 		cancel()
-	}
-	defer stop()
+	}()
 
-	logs := make(chan []byte, 2)
+	logs := make(chan []byte)
 	go produceLogs(stdout, logs)
 	go consumeLogs(ctx, logs, g.logConsumer, g)
 
-	go func() {
-		err := printYtDlpErrors(stderr, g.Id, g.URL)
-		if err != nil {
-			stop()
-		}
-	}()
+	go printYtDlpErrors(stderr, g.Id, g.URL)
 
 	g.SetPending(false)
 	return cmd.Wait()

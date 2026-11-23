@@ -47,6 +47,7 @@ import {
   serverPortState,
   themeState
 } from '../atoms/settings'
+import { customArgsState } from '../atoms/downloadTemplate'
 import CookiesTextField from '../components/CookiesTextField'
 import UpdateBinaryButton from '../components/UpdateBinaryButton'
 import { useToast } from '../hooks/toast'
@@ -64,6 +65,7 @@ export default function Settings() {
   const [fileRenaming, setFileRenaming] = useAtom(fileRenamingState)
   const [autoFileExtension, setAutoFileExtension] = useAtom(autoFileExtensionState)
   const [enableArgs, setEnableArgs] = useAtom(enableCustomArgsState)
+  const [customArgs, setCustomArgs] = useAtom(customArgsState)
 
   const [serverAddr, setServerAddr] = useAtom(serverAddressState)
   const [serverPort, setServerPort] = useAtom(serverPortState)
@@ -380,6 +382,7 @@ export default function Settings() {
               }
               label={i18n.t('customArgs')}
             />
+              {enableArgs && <TextField fullWidth multiline minRows={3} maxRows={8} label="Custom arguments" value={customArgs} onChange={e => setCustomArgs(e.target.value)} sx={{ mt: 1 }} />}
           </Stack>
         </Grid>
         <Grid sx={{ mr: 1, mt: 2 }}>

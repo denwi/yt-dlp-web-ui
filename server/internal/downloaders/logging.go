@@ -25,24 +25,22 @@ func (j *JSONLogConsumer) ParseLogEntry(entry []byte, d Downloader) {
 	var progress internal.ProgressTemplate
 	var postprocess internal.PostprocessTemplate
 
-	if err := json.Unmarshal(entry, &progress); err == nil {
-		if progress.Percentage != "" {
-			d.SetProgress(internal.DownloadProgress{
-				Status:     internal.StatusDownloading,
-				Percentage: progress.Percentage,
-				Speed:      progress.Speed,
-				ETA:        progress.Eta,
-			})
+	if err := json.Unmarshal(entry, &progress); err == nil && progress.Percentage != "" {
+		d.SetProgress(internal.DownloadProgress{
+			Status:     internal.StatusDownloading,
+			Percentage: progress.Percentage,
+			Speed:      progress.Speed,
+			ETA:        progress.Eta,
+		})
 
-			slog.Info("progress",
-				slog.String("id", j.GetShortId(d.GetId())),
-				slog.String("url", d.GetUrl()),
-				slog.String("percentage", progress.Percentage),
-			)
-		}
+		slog.Info("progress",
+			slog.String("id", j.GetShortId(d.GetId())),
+			slog.String("url", d.GetUrl()),
+			slog.String("percentage", progress.Percentage),
+		)
 	}
 
-	if err := json.Unmarshal(entry, &postprocess); err == nil {
+	if err := json.Unmarshal(entry, &postprocess); err == nil && postprocess.FilePath != "" {
 		d.UpdateSavedFilePath(postprocess.FilePath)
 	}
 }

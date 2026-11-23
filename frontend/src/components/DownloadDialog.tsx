@@ -46,7 +46,6 @@ import { useI18n } from '../hooks/useI18n'
 import { useRPC } from '../hooks/useRPC'
 import type { DLMetadata } from '../types'
 import { toFormatArgs } from '../utils'
-import CustomArgsTextField from './CustomArgsTextField'
 import ExtraDownloadOptions from './ExtraDownloadOptions'
 import LoadingBackdrop from './LoadingBackdrop'
 
@@ -272,11 +271,6 @@ const DownloadDialog: FC<Props> = ({ open, onClose, onDownloadStart }) => {
                   />
                 </Grid>
                 <Grid container spacing={1} sx={{ mt: 1 }}>
-                  {settings.enableCustomArgs &&
-                    <Grid item xs={12}>
-                      <CustomArgsTextField />
-                    </Grid>
-                  }
                   {
                     settings.fileRenaming &&
                     <Grid item xs={
