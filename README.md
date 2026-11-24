@@ -7,7 +7,9 @@
 
 This repo is not meant to be production ready and I have merely made changes, partially vibe-coded, to fit my needs for downloading TVer episodes and to handle transient network throttling/connection resets, as well as to truncate filenames for very long Japanese titles.
 
-Original README.md:
+This repo is meant to be downloaded and built with the supplied Dockerfile in the project root. It will pull in the latest nightly yt-dlp binary as well.
+
+## Original README.md:
 
 # yt-dlp Web UI
 
