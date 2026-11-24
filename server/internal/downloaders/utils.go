@@ -5,12 +5,27 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"math"
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/marcopiovanello/yt-dlp-web-ui/v4/server/internal"
 )
+
+const (
+	maxReconnectAttempts = 5
+	reconnectDelaySecs   = 5
+)
+
+var transientErrorPatterns = []string{
+	"connection reset by peer",
+	"timeout",
+	"network is unreachable",
+	"no route to host",
+	"etimedout",
+}
 
 func argsSanitizer(params []string) []string {
 	params = slices.DeleteFunc(params, func(e string) bool {
@@ -63,6 +78,29 @@ func consumeLogs(ctx context.Context, logs <-chan []byte, c LogConsumer, d Downl
 	}
 }
 
+// isTransientError checks if an error matches transient network error patterns
+func isTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errMsg := strings.ToLower(err.Error())
+
+	for _, pattern := range transientErrorPatterns {
+		if strings.Contains(errMsg, pattern) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// sleepWithBackoff sleeps with exponential backoff
+func sleepWithBackoff(attempt int) time.Duration {
+	delay := float64(reconnectDelaySecs) * math.Pow(2, float64(attempt))
+	return time.Duration(int(delay))
+}
+
 func printYtDlpErrors(stdout io.Reader, shortId, url string) {
 	scanner := bufio.NewScanner(stdout)
 
@@ -73,4 +111,27 @@ func printYtDlpErrors(stdout io.Reader, shortId, url string) {
 			slog.String("err", scanner.Text()),
 		)
 	}
+}
+
+// retryOnTransientError retries running a function with exponential backoff for transient errors
+func retryOnTransientError(fn func() error, id, url string) error {
+	for attempt := 0; attempt < maxReconnectAttempts; attempt++ {
+		err := fn()
+
+		if err == nil || !isTransientError(err) {
+			return err
+		}
+
+		slog.Warn("yt-dlp command failed with transient error, retrying",
+			slog.String("id", id),
+			slog.String("url", url),
+			slog.Int("attempt", attempt+1),
+			slog.Int("maxAttempts", maxReconnectAttempts),
+			slog.String("error", err.Error()),
+		)
+
+		sleepWithBackoff(attempt)
+	}
+
+	return fn()
 }

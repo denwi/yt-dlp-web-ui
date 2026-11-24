@@ -133,8 +133,6 @@ func (g *GenericDownloader) Start() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer func() {
 		stdout.Close()
-		g.progress = internal.DownloadProgress{Status: internal.StatusCompleted, Percentage: "-1"}
-		g.Complete()
 		cancel()
 	}()
 
@@ -145,7 +143,35 @@ func (g *GenericDownloader) Start() error {
 	go printYtDlpErrors(stderr, g.Id, g.URL)
 
 	g.SetPending(false)
-	return cmd.Wait()
+
+	// Retry transient network errors with exponential backoff
+	for attempt := 0; attempt < maxReconnectAttempts; attempt++ {
+		err = cmd.Wait()
+
+		if err == nil || !isTransientError(err) {
+			break
+		}
+
+		slog.Warn("yt-dlp command failed with transient error, retrying",
+			slog.String("id", g.Id),
+			slog.String("url", g.URL),
+			slog.Int("attempt", attempt+1),
+			slog.Int("maxAttempts", maxReconnectAttempts),
+			slog.String("error", err.Error()),
+		)
+
+		sleepWithBackoff(attempt)
+	}
+
+	if err == nil {
+		g.progress.Status = internal.StatusCompleted
+	} else if !isTransientError(err) {
+		g.progress.Status = internal.StatusErrored
+	}
+
+	g.Complete()
+
+	return err
 }
 
 func (g *GenericDownloader) Stop() error {
