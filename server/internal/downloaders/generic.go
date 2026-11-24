@@ -92,7 +92,7 @@ func (g *GenericDownloader) Start() error {
 		"--no-playlist",
 		"--progress-template",
 		templateReplacer.Replace(downloadTemplate),
-                "--progress-template",
+		"--progress-template",
 		templateReplacer.Replace(postprocessTemplate),
 		"--no-exec",
 		"--js-runtimes",
@@ -164,8 +164,22 @@ func (g *GenericDownloader) Start() error {
 
 		transient := isTransientError(err)
 
-		if !transient && stderrOutput != "" {
-			transient = isTransientError(errors.New(stderrOutput))
+		if stderrOutput != "" {
+			lowerStderr := strings.ToLower(stderrOutput)
+			transient = transient ||
+				isTransientError(errors.New(stderrOutput)) ||
+				strings.Contains(lowerStderr, "read timed out") ||
+				strings.Contains(lowerStderr, "connection timed out") ||
+				strings.Contains(lowerStderr, "unexpected_eof_while_reading") ||
+				strings.Contains(lowerStderr, "transporterror") ||
+				strings.Contains(lowerStderr, "sslerror") ||
+				strings.Contains(lowerStderr, "connection reset") ||
+				strings.Contains(lowerStderr, "connection aborted") ||
+				strings.Contains(lowerStderr, "failed to resolve") ||
+				strings.Contains(lowerStderr, "try again") ||
+				strings.Contains(lowerStderr, "unable to download video data") ||
+				strings.Contains(lowerStderr, "error") ||
+				strings.Contains(lowerStderr, "unable to download streaks api info")
 		}
 
 		if !transient {
