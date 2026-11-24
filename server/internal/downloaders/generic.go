@@ -1,9 +1,12 @@
 package downloaders
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -62,7 +65,6 @@ func NewGenericDownload(url string, params []string) Downloader {
 
 func (g *GenericDownloader) Start() error {
 	g.SetPending(true)
-
 	g.Params = argsSanitizer(g.Params)
 
 	out := internal.DownloadOutput{
@@ -78,18 +80,19 @@ func (g *GenericDownloader) Start() error {
 		out.Filename = g.output.Filename
 	}
 
-	buildFilename(&g.output)
+	buildFilename(&out)
+	g.output.Filename = out.Filename
 
 	templateReplacer := strings.NewReplacer("\n", "", "\t", "", " ", "")
 
 	baseParams := []string{
-		strings.Split(g.URL, "?list")[0], //no playlist
+		strings.Split(g.URL, "?list")[0],
 		"--newline",
 		"--no-colors",
 		"--no-playlist",
 		"--progress-template",
 		templateReplacer.Replace(downloadTemplate),
-		"--progress-template",
+                "--progress-template",
 		templateReplacer.Replace(postprocessTemplate),
 		"--no-exec",
 		"--js-runtimes",
@@ -98,77 +101,106 @@ func (g *GenericDownloader) Start() error {
 		"ejs:github",
 	}
 
-	// if user asked to manually override the output path...
 	if !(slices.Contains(g.Params, "-P") || slices.Contains(g.Params, "--paths")) {
 		g.Params = append(g.Params, "-o")
-		g.Params = append(g.Params, fmt.Sprintf("%s/%s", out.Path, out.Filename))
+		g.Params = append(g.Params, fmt.Sprintf("%s/%s", out.Path, g.output.Filename))
 	}
 
 	params := append(baseParams, g.Params...)
 
-	slog.Info("requesting download", slog.String("url", g.URL), slog.Any("params", params))
+	const maxRetries = 5
+	var err error
 
-	cmd := exec.Command(config.Instance().Paths.DownloaderPath, params...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		slog.Info("requesting download",
+			slog.String("url", g.URL),
+			slog.Int("attempt", attempt+1),
+			slog.Int("maxAttempts", maxRetries+1),
+			slog.Any("params", params),
+		)
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		slog.Error("failed to get a stdout pipe", slog.Any("err", err))
-		panic(err)
-	}
+		cmd := exec.Command(config.Instance().Paths.DownloaderPath, params...)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		slog.Error("failed to get a stderr pipe", slog.Any("err", err))
-		panic(err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		slog.Error("failed to start yt-dlp process", slog.Any("err", err))
-		panic(err)
-	}
-
-	g.proc = cmd.Process
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer func() {
-		stdout.Close()
-		cancel()
-	}()
-
-	logs := make(chan []byte)
-	go produceLogs(stdout, logs)
-	go consumeLogs(ctx, logs, g.logConsumer, g)
-
-	go printYtDlpErrors(stderr, g.Id, g.URL)
-
-	g.SetPending(false)
-
-	// Retry transient network errors with exponential backoff
-	for attempt := 0; attempt < maxReconnectAttempts; attempt++ {
-		err = cmd.Wait()
-
-		if err == nil || !isTransientError(err) {
+		stdout, pipeErr := cmd.StdoutPipe()
+		if pipeErr != nil {
+			err = pipeErr
 			break
 		}
 
-		slog.Warn("yt-dlp command failed with transient error, retrying",
+		var stderrBuf bytes.Buffer
+		cmd.Stderr = &stderrBuf
+
+		if err = cmd.Start(); err != nil {
+			slog.Error("failed to start yt-dlp process", slog.Any("err", err))
+			break
+		}
+
+		g.proc = cmd.Process
+		g.SetPending(false)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		logs := make(chan []byte)
+
+		go produceLogs(stdout, logs)
+		go consumeLogs(ctx, logs, g.logConsumer, g)
+
+		err = cmd.Wait()
+
+		stdout.Close()
+		cancel()
+		g.proc = nil
+
+		stderrOutput := stderrBuf.String()
+
+		if stderrOutput != "" {
+			printYtDlpErrors(bytes.NewReader(stderrBuf.Bytes()), g.Id, g.URL)
+		}
+
+		if err == nil {
+			g.progress.Status = internal.StatusCompleted
+			break
+		}
+
+		transient := isTransientError(err)
+
+		if !transient && stderrOutput != "" {
+			transient = isTransientError(errors.New(stderrOutput))
+		}
+
+		if !transient {
+			slog.Error("yt-dlp failed with a permanent error",
+				slog.String("id", g.Id),
+				slog.String("error", err.Error()),
+			)
+			break
+		}
+
+		if attempt == maxRetries {
+			slog.Error("yt-dlp exhausted retry attempts",
+				slog.String("id", g.Id),
+				slog.String("url", g.URL),
+				slog.Int("attempts", maxRetries+1),
+				slog.String("error", err.Error()),
+			)
+			break
+		}
+
+		slog.Warn("yt-dlp encountered a transient error, retrying",
 			slog.String("id", g.Id),
-			slog.String("url", g.URL),
 			slog.Int("attempt", attempt+1),
-			slog.Int("maxAttempts", maxReconnectAttempts),
+			slog.Int("maxRetries", maxRetries),
 			slog.String("error", err.Error()),
 		)
 
 		sleepWithBackoff(attempt)
 	}
 
-	if err == nil {
-		g.progress.Status = internal.StatusCompleted
-	} else if !isTransientError(err) {
+	if err != nil {
 		g.progress.Status = internal.StatusErrored
 	}
 
+	g.proc = nil
 	g.Complete()
 
 	return err
@@ -243,3 +275,33 @@ func (g *GenericDownloader) RestoreFromSnapshot(snap *internal.ProcessSnapshot) 
 }
 
 func (g *GenericDownloader) IsCompleted() bool { return g.Completed }
+
+// newStderrScanner creates a scanner with a larger buffer to handle large stderr output
+func newStderrScanner(r io.Reader) *bufio.Scanner {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 1024), 64*1024)
+	return scanner
+}
+
+// retryWithStdErrCheck runs a function and retries on transient errors detected in stderr or the error itself
+func retryWithStdErrCheck(fn func() error, id, url string, stderrLines <-chan string) error {
+	for attempt := 0; attempt < maxReconnectAttempts; attempt++ {
+		err := fn()
+
+		if err == nil || !isTransientError(err) {
+			return err // Permanent error or non-transient, don't retry
+		}
+
+		slog.Warn("yt-dlp command failed with transient error, retrying",
+			slog.String("id", id),
+			slog.String("url", url),
+			slog.Int("attempt", attempt+1),
+			slog.Int("maxAttempts", maxReconnectAttempts),
+			slog.String("error", err.Error()),
+		)
+
+		sleepWithBackoff(attempt)
+	}
+
+	return fn() // Last attempt exhausted, try one final time without retry
+}

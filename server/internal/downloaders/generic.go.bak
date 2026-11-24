@@ -1,9 +1,11 @@
 package downloaders
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -75,7 +77,7 @@ func (g *GenericDownloader) Start() error {
 	}
 
 	if g.output.Filename != "" {
-		out.Filename = g.output.Filename
+		g.output.Filename = g.output.Filename
 	}
 
 	buildFilename(&g.output)
@@ -89,7 +91,6 @@ func (g *GenericDownloader) Start() error {
 		"--no-playlist",
 		"--progress-template",
 		templateReplacer.Replace(downloadTemplate),
-		"--progress-template",
 		templateReplacer.Replace(postprocessTemplate),
 		"--no-exec",
 		"--js-runtimes",
@@ -101,7 +102,7 @@ func (g *GenericDownloader) Start() error {
 	// if user asked to manually override the output path...
 	if !(slices.Contains(g.Params, "-P") || slices.Contains(g.Params, "--paths")) {
 		g.Params = append(g.Params, "-o")
-		g.Params = append(g.Params, fmt.Sprintf("%s/%s", out.Path, out.Filename))
+		g.Params = append(g.Params, fmt.Sprintf("%s/%s", out.Path, g.output.Filename))
 	}
 
 	params := append(baseParams, g.Params...)
@@ -133,7 +134,6 @@ func (g *GenericDownloader) Start() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer func() {
 		stdout.Close()
-		g.Complete()
 		cancel()
 	}()
 
@@ -144,7 +144,19 @@ func (g *GenericDownloader) Start() error {
 	go printYtDlpErrors(stderr, g.Id, g.URL)
 
 	g.SetPending(false)
-	return cmd.Wait()
+
+        // Wait for the yt-dlp process to finish
+        err = cmd.Wait()
+
+	if err == nil {
+		g.progress.Status = internal.StatusCompleted
+	} else if !isTransientError(err) {
+		g.progress.Status = internal.StatusErrored
+	}
+
+	g.Complete()
+
+	return err
 }
 
 func (g *GenericDownloader) Stop() error {
@@ -216,3 +228,33 @@ func (g *GenericDownloader) RestoreFromSnapshot(snap *internal.ProcessSnapshot) 
 }
 
 func (g *GenericDownloader) IsCompleted() bool { return g.Completed }
+
+// newStderrScanner creates a scanner with a larger buffer to handle large stderr output
+func newStderrScanner(r io.Reader) *bufio.Scanner {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 1024), 64*1024)
+	return scanner
+}
+
+// retryWithStdErrCheck runs a function and retries on transient errors detected in stderr or the error itself
+func retryWithStdErrCheck(fn func() error, id, url string, stderrLines <-chan string) error {
+	for attempt := 0; attempt < maxReconnectAttempts; attempt++ {
+		err := fn()
+
+		if err == nil || !isTransientError(err) {
+			return err // Permanent error or non-transient, don't retry
+		}
+
+		slog.Warn("yt-dlp command failed with transient error, retrying",
+			slog.String("id", id),
+			slog.String("url", url),
+			slog.Int("attempt", attempt+1),
+			slog.Int("maxAttempts", maxReconnectAttempts),
+			slog.String("error", err.Error()),
+		)
+
+		sleepWithBackoff(attempt)
+	}
+
+	return fn() // Last attempt exhausted, try one final time without retry
+}

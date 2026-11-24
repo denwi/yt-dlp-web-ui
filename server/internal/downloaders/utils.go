@@ -112,26 +112,3 @@ func printYtDlpErrors(stdout io.Reader, shortId, url string) {
 		)
 	}
 }
-
-// retryOnTransientError retries running a function with exponential backoff for transient errors
-func retryOnTransientError(fn func() error, id, url string) error {
-	for attempt := 0; attempt < maxReconnectAttempts; attempt++ {
-		err := fn()
-
-		if err == nil || !isTransientError(err) {
-			return err
-		}
-
-		slog.Warn("yt-dlp command failed with transient error, retrying",
-			slog.String("id", id),
-			slog.String("url", url),
-			slog.Int("attempt", attempt+1),
-			slog.Int("maxAttempts", maxReconnectAttempts),
-			slog.String("error", err.Error()),
-		)
-
-		sleepWithBackoff(attempt)
-	}
-
-	return fn()
-}
