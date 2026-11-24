@@ -159,6 +159,7 @@ func (g *GenericDownloader) Start() error {
 
 		if err == nil {
 			g.progress.Status = internal.StatusCompleted
+			g.progress.Percentage = "-1"
 			break
 		}
 
